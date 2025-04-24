@@ -898,25 +898,25 @@ elif st.session_state.current_step == 7:
             st.session_state.current_step = 6
             st.experimental_rerun()
 
-
-# 用于连接服务器的按钮
-def connect_to_server():
-    url = "http://your-server-ip:5000"  # 修改为你实际的服务器地址
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            st.success("成功连接到服务器！")
-        else:
-            st.error(f"连接失败，状态码：{response.status_code}")
-    except Exception as e:
-        st.error(f"连接服务器时发生错误: {str(e)}")
-
-# 连接服务器按钮
-if st.button("连接服务器"):
-    connect_to_server()
-
 # 页脚
-
 st.markdown("---")
 st.markdown("### 电池寿命预测系统 | 基于机器学习的SOH和RUL预测")
 st.markdown("© 2025 电池健康管理团队")
+
+import requests
+
+# Function to connect to the server
+def connect_to_server():
+    url = "http://your-server-ip:5000"  # Replace with your actual server address
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            st.success("Successfully connected to the server!")
+        else:
+            st.error(f"Connection failed, status code: {response.status_code}")
+    except Exception as e:
+        st.error(f"Error connecting to the server: {str(e)}")
+
+# Button to trigger server connection
+if st.button("Connect to Server"):
+    connect_to_server()
