@@ -23,6 +23,7 @@ from exploratory_data_analysis import BatteryDataExplorer
 from feature_extraction import BatteryFeatureExtractor
 from prediction_models import BatteryPredictionModel
 from model_evaluation import ModelEvaluator
+from server_connection import ServerConnection
 
 # 配置页面
 st.set_page_config(
@@ -57,6 +58,10 @@ if 'target_col' not in st.session_state:
     st.session_state.target_col = None
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
+if 'server_connection' not in st.session_state:
+    st.session_state.server_connection = ServerConnection()
+if 'server_connected' not in st.session_state:
+    st.session_state.server_connected = False
 
 # 辅助函数
 def allowed_file(filename):
@@ -78,7 +83,7 @@ st.sidebar.image("https://img.icons8.com/color/96/000000/battery-level.png", wid
 step = st.sidebar.radio(
     "导航",
     ["1. 数据上传", "2. 数据预处理", "3. 探索性分析", "4. 特征提取", 
-     "5. 模型训练", "6. 预测与评估", "7. 模型优化"],
+     "5. 模型训练", "6. 预测与评估", "7. 模型优化", "8. 服务器连接"],
     index=st.session_state.current_step - 1
 )
 
@@ -434,25 +439,9 @@ elif st.session_state.current_step == 4:
                     
                     # 显示特征统计信息
                     st.subheader("特征统计信息")
-                    st.info(f"共提取了 {features_df.shape[1]-1} 个特征，覆盖 {features_df.shape[0]} 个循环")
+                    st.write(f"提取的特征数量: {features_df.shape[1]}")
                     
-                    # 特征重要性可视化
-                    if 'SOH' in features_df.columns:
-                        st.subheader("特征与SOH的相关性")
-                        
-                        # 计算与SOH的相关性
-                        corr_with_soh = features_df.corr()['SOH'].sort_values(ascending=False)
-                        corr_with_soh = corr_with_soh.drop('SOH')
-                        
-                        # 显示前10个最相关的特征
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        corr_with_soh.head(10).plot(kind='bar', ax=ax)
-                        plt.title('与SOH最相关的10个特征')
-                        plt.ylabel('相关系数')
-                        plt.tight_layout()
-                        st.pyplot(fig)
-                    
-                    # 保存提取的特征
+                    # 保存特征数据
                     features_file = os.path.join(OUTPUT_FOLDER, "extracted_features.csv")
                     features_df.to_csv(features_file, index=False)
                     
@@ -464,6 +453,11 @@ elif st.session_state.current_step == 4:
                             file_name="extracted_features.csv",
                             mime="text/csv"
                         )
+                    
+                    # 更新会话状态
+                    st.session_state.feature_cols = features_df.columns.tolist()
+                    if capacity_col:
+                        st.session_state.target_col = capacity_col
             
             except Exception as e:
                 st.error(f"提取特征时出错: {str(e)}")
@@ -494,124 +488,109 @@ elif st.session_state.current_step == 5:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("目标与特征")
+            st.subheader("选择特征和目标")
             
             # 选择目标列
-            target_options = ["SOH"]
-            if "capacity_max" in st.session_state.features.columns:
-                target_options.append("capacity_max")
-            
-            target_col = st.selectbox("目标列", target_options)
+            if st.session_state.target_col:
+                target_col = st.selectbox(
+                    "目标列", 
+                    [st.session_state.target_col] + [col for col in st.session_state.data.columns if col != st.session_state.target_col]
+                )
+            else:
+                target_col = st.selectbox("目标列", st.session_state.data.columns)
             
             # 选择特征列
             feature_cols = st.multiselect(
-                "特征列 (可选，默认使用所有数值特征)",
-                [col for col in st.session_state.features.columns if col != target_col and col != 'cycle'],
-                default=[]
+                "特征列", 
+                [col for col in st.session_state.features.columns if col != target_col],
+                default=[col for col in st.session_state.features.columns if col != target_col][:5]
             )
-            
-            # 如果没有选择特征，使用所有数值特征
-            if not feature_cols:
-                feature_cols = [col for col in st.session_state.features.columns 
-                               if col != target_col and col != 'cycle' 
-                               and np.issubdtype(st.session_state.features[col].dtype, np.number)]
-            
-            # 训练集比例
-            train_ratio = st.slider("训练集比例", 0.5, 0.9, 0.8, 0.05)
         
         with col2:
-            st.subheader("模型选择")
-            
+            st.subheader("模型选项")
             model_type = st.selectbox(
-                "模型类型",
-                ["SVR", "随机森林", "XGBoost", "LightGBM", "LSTM"]
+                "模型类型", 
+                ["线性回归", "随机森林", "支持向量机", "神经网络", "梯度提升树"]
             )
             
-            # 根据模型类型显示不同的参数
-            if model_type == "SVR":
-                kernel = st.selectbox("核函数", ["rbf", "linear", "poly", "sigmoid"])
-                C = st.slider("正则化参数 C", 0.1, 10.0, 1.0, 0.1)
-                epsilon = st.slider("Epsilon", 0.01, 0.5, 0.1, 0.01)
-                model_params = {"kernel": kernel, "C": C, "epsilon": epsilon}
+            test_size = st.slider(
+                "测试集比例", 
+                min_value=0.1, 
+                max_value=0.5, 
+                value=0.2, 
+                step=0.05
+            )
             
-            elif model_type == "随机森林":
-                n_estimators = st.slider("树的数量", 10, 200, 100, 10)
-                max_depth = st.slider("最大深度", 3, 20, 10, 1)
-                model_params = {"n_estimators": n_estimators, "max_depth": max_depth}
-            
-            elif model_type == "XGBoost":
-                n_estimators = st.slider("树的数量", 10, 200, 100, 10)
-                learning_rate = st.slider("学习率", 0.01, 0.3, 0.1, 0.01)
-                max_depth = st.slider("最大深度", 3, 10, 6, 1)
-                model_params = {
-                    "n_estimators": n_estimators, 
-                    "learning_rate": learning_rate,
-                    "max_depth": max_depth
-                }
-            
-            elif model_type == "LightGBM":
-                n_estimators = st.slider("树的数量", 10, 200, 100, 10)
-                learning_rate = st.slider("学习率", 0.01, 0.3, 0.1, 0.01)
-                max_depth = st.slider("最大深度", 3, 10, 6, 1)
-                model_params = {
-                    "n_estimators": n_estimators, 
-                    "learning_rate": learning_rate,
-                    "max_depth": max_depth
-                }
-            
-            elif model_type == "LSTM":
-                units = st.slider("LSTM单元数", 16, 128, 64, 8)
-                epochs = st.slider("训练轮数", 10, 200, 50, 10)
-                batch_size = st.slider("批量大小", 8, 64, 32, 8)
-                model_params = {
-                    "units": units, 
-                    "epochs": epochs,
-                    "batch_size": batch_size
-                }
+            use_cv = st.checkbox("使用交叉验证", value=True)
+            if use_cv:
+                cv_folds = st.slider(
+                    "交叉验证折数", 
+                    min_value=2, 
+                    max_value=10, 
+                    value=5, 
+                    step=1
+                )
         
         if st.button("训练模型"):
             try:
                 with st.spinner("正在训练模型..."):
+                    # 准备数据
+                    X = st.session_state.features[feature_cols]
+                    y = st.session_state.data[target_col]
+                    
                     # 创建模型
                     model = BatteryPredictionModel()
                     
                     # 训练模型
-                    model.train_model(
-                        data=st.session_state.features,
-                        target_col=target_col,
-                        feature_cols=feature_cols,
-                        model_type=model_type,
-                        model_params=model_params,
-                        train_ratio=train_ratio
+                    if model_type == "线性回归":
+                        model_name = "linear_regression"
+                    elif model_type == "随机森林":
+                        model_name = "random_forest"
+                    elif model_type == "支持向量机":
+                        model_name = "svm"
+                    elif model_type == "神经网络":
+                        model_name = "neural_network"
+                    else:
+                        model_name = "gradient_boosting"
+                    
+                    # 训练模型
+                    model.train(
+                        X=X,
+                        y=y,
+                        model_type=model_name,
+                        test_size=test_size,
+                        use_cv=use_cv,
+                        cv_folds=cv_folds if use_cv else None
                     )
                     
                     # 更新会话状态
                     st.session_state.model = model
                     st.session_state.model_name = model_type
-                    st.session_state.feature_cols = feature_cols
-                    st.session_state.target_col = target_col
                     
                     # 显示训练结果
-                    st.success(f"{model_type} 模型训练完成！")
+                    st.success(f"{model_type}模型训练完成！")
                     
-                    # 显示模型评估指标
-                    st.subheader("模型评估")
-                    metrics = model.evaluate_model()
+                    # 显示模型性能
+                    st.subheader("模型性能")
+                    metrics = model.get_metrics()
+                    st.json(metrics)
                     
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("R²", f"{metrics['r2']:.4f}")
-                    col2.metric("MAE", f"{metrics['mae']:.4f}")
-                    col3.metric("MSE", f"{metrics['mse']:.4f}")
-                    col4.metric("RMSE", f"{metrics['rmse']:.4f}")
-                    
-                    # 显示预测vs实际值图
-                    st.subheader("预测 vs 实际值")
-                    fig = model.plot_prediction_vs_actual()
-                    st.pyplot(fig)
+                    # 显示特征重要性
+                    if model_name in ["random_forest", "gradient_boosting"]:
+                        st.subheader("特征重要性")
+                        importances = model.get_feature_importance(feature_cols)
+                        
+                        # 绘制特征重要性图
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        sns.barplot(x=importances, y=feature_cols, ax=ax)
+                        ax.set_title("特征重要性")
+                        ax.set_xlabel("重要性")
+                        ax.set_ylabel("特征")
+                        st.pyplot(fig)
                     
                     # 保存模型
-                    model_file = os.path.join(MODELS_FOLDER, f"{model_type.lower()}_model.pkl")
-                    joblib.dump(model, model_file)
+                    model_file = os.path.join(MODELS_FOLDER, f"{model_name}_model.pkl")
+                    joblib.dump(model.model, model_file)
                     
                     st.info(f"模型已保存到 {model_file}")
             
@@ -639,100 +618,77 @@ elif st.session_state.current_step == 6:
             st.session_state.current_step = 5
             st.experimental_rerun()
     else:
-        st.write(f"使用 {st.session_state.model_name} 模型进行预测")
+        st.write(f"使用{st.session_state.model_name}模型进行预测和评估")
         
-        col1, col2 = st.columns(2)
+        # 选择评估选项
+        st.subheader("评估选项")
+        show_predictions = st.checkbox("显示预测结果", value=True)
+        show_residuals = st.checkbox("显示残差分析", value=True)
+        show_learning_curve = st.checkbox("显示学习曲线", value=True)
         
-        with col1:
-            st.subheader("SOH预测")
-            
-            # 选择要预测的循环
-            max_cycle = st.session_state.features['cycle'].max()
-            cycles_to_predict = st.slider(
-                "预测循环数",
-                int(max_cycle * 0.1),
-                int(max_cycle * 2),
-                int(max_cycle * 1.5),
-                step=10
-            )
-            
-            # EOL阈值
-            eol_threshold = st.slider(
-                "EOL阈值 (SOH百分比)",
-                50, 90, 80, 1
-            ) / 100.0
-        
-        with col2:
-            st.subheader("预测选项")
-            
-            # 预测方法
-            prediction_method = st.selectbox(
-                "预测方法",
-                ["直接预测", "递归预测", "集成预测"]
-            )
-            
-            # 置信区间
-            show_confidence = st.checkbox("显示置信区间", value=True)
-            confidence_level = st.slider("置信水平", 0.8, 0.99, 0.95, 0.01)
-        
-        if st.button("执行预测"):
+        if st.button("执行评估"):
             try:
-                with st.spinner("正在预测..."):
-                    model = st.session_state.model
-                    
-                    # 预测SOH
-                    st.subheader("SOH预测结果")
+                with st.spinner("正在评估模型..."):
+                    # 创建评估器
+                    evaluator = ModelEvaluator(st.session_state.model)
                     
                     # 获取预测结果
-                    predictions, confidence = model.predict_future(
-                        cycles_to_predict=cycles_to_predict,
-                        prediction_method=prediction_method,
-                        confidence_level=confidence_level if show_confidence else None
-                    )
+                    y_true, y_pred = st.session_state.model.get_predictions()
                     
-                    # 显示预测图
-                    fig = model.plot_predictions(
-                        predictions=predictions,
-                        confidence=confidence if show_confidence else None,
-                        eol_threshold=eol_threshold
-                    )
-                    st.pyplot(fig)
+                    # 显示预测结果
+                    if show_predictions:
+                        st.subheader("预测结果")
+                        
+                        # 创建预测结果数据框
+                        results_df = pd.DataFrame({
+                            "实际值": y_true,
+                            "预测值": y_pred,
+                            "误差": y_true - y_pred,
+                            "相对误差 (%)": (y_true - y_pred) / y_true * 100
+                        })
+                        
+                        st.dataframe(results_df)
+                        
+                        # 绘制实际值与预测值对比图
+                        fig = evaluator.plot_predictions(y_true, y_pred)
+                        st.pyplot(fig)
                     
-                    # 计算RUL
-                    rul = model.calculate_rul(
-                        predictions=predictions,
-                        eol_threshold=eol_threshold
-                    )
+                    # 显示残差分析
+                    if show_residuals:
+                        st.subheader("残差分析")
+                        fig = evaluator.plot_residuals(y_true, y_pred)
+                        st.pyplot(fig)
                     
-                    # 显示RUL
-                    st.subheader("剩余使用寿命 (RUL) 预测")
-                    st.info(f"预测RUL: {rul} 循环")
-                    
-                    # 显示RUL图
-                    fig = model.plot_rul(
-                        predictions=predictions,
-                        eol_threshold=eol_threshold
-                    )
-                    st.pyplot(fig)
-                    
-                    # 保存预测结果
-                    predictions_file = os.path.join(OUTPUT_FOLDER, "predictions.csv")
-                    pd.DataFrame({
-                        'cycle': range(max_cycle + 1, max_cycle + cycles_to_predict + 1),
-                        'predicted_soh': predictions
-                    }).to_csv(predictions_file, index=False)
-                    
-                    # 提供下载链接
-                    with open(predictions_file, "rb") as file:
-                        st.download_button(
-                            label="下载预测结果",
-                            data=file,
-                            file_name="predictions.csv",
-                            mime="text/csv"
+                    # 显示学习曲线
+                    if show_learning_curve:
+                        st.subheader("学习曲线")
+                        fig = evaluator.plot_learning_curve(
+                            st.session_state.features[st.session_state.model.feature_cols],
+                            st.session_state.data[st.session_state.model.target_col],
+                            cv=5
                         )
+                        st.pyplot(fig)
+                    
+                    # 显示模型性能指标
+                    st.subheader("模型性能指标")
+                    metrics = evaluator.calculate_metrics(y_true, y_pred)
+                    
+                    # 创建指标表格
+                    metrics_df = pd.DataFrame({
+                        "指标": list(metrics.keys()),
+                        "值": list(metrics.values())
+                    })
+                    
+                    st.dataframe(metrics_df)
+                    
+                    # 保存评估结果
+                    evaluation_file = os.path.join(OUTPUT_FOLDER, "model_evaluation.png")
+                    fig.savefig(evaluation_file, bbox_inches='tight')
+                    
+                    st.success("模型评估完成！")
             
             except Exception as e:
-                st.error(f"预测时出错: {str(e)}")
+                st.error(f"评估模型时出错: {str(e)}")
         
         # 导航按钮
         col1, col2 = st.columns(2)
@@ -757,136 +713,181 @@ elif st.session_state.current_step == 7:
     else:
         st.write("选择模型优化选项")
         
-        col1, col2 = st.columns(2)
+        # 选择优化方法
+        optimization_method = st.selectbox(
+            "优化方法", 
+            ["网格搜索", "随机搜索", "贝叶斯优化"]
+        )
         
-        with col1:
-            st.subheader("优化方法")
-            
-            optimization_method = st.selectbox(
-                "优化方法",
-                ["超参数优化", "特征选择", "集成学习"]
-            )
-            
-            if optimization_method == "超参数优化":
-                search_method = st.selectbox(
-                    "搜索方法",
-                    ["网格搜索", "随机搜索", "贝叶斯优化"]
-                )
-                n_iter = st.slider("搜索迭代次数", 10, 100, 30, 5)
-                cv_folds = st.slider("交叉验证折数", 3, 10, 5, 1)
-                
-                optimization_params = {
-                    "search_method": search_method,
-                    "n_iter": n_iter,
-                    "cv": cv_folds
-                }
-            
-            elif optimization_method == "特征选择":
-                selection_method = st.selectbox(
-                    "选择方法",
-                    ["递归特征消除", "特征重要性", "相关性筛选"]
-                )
-                n_features = st.slider(
-                    "选择特征数量", 
-                    5, 
-                    len(st.session_state.feature_cols), 
-                    min(10, len(st.session_state.feature_cols)), 
-                    1
-                )
-                
-                optimization_params = {
-                    "selection_method": selection_method,
-                    "n_features": n_features
-                }
-            
-            elif optimization_method == "集成学习":
-                ensemble_method = st.selectbox(
-                    "集成方法",
-                    ["投票", "堆叠", "加权平均"]
-                )
-                base_models = st.multiselect(
-                    "基础模型",
-                    ["SVR", "随机森林", "XGBoost", "LightGBM"],
-                    default=["SVR", "随机森林", "XGBoost"]
-                )
-                
-                optimization_params = {
-                    "ensemble_method": ensemble_method,
-                    "base_models": base_models
-                }
+        # 选择优化参数
+        st.subheader("优化参数")
         
-        with col2:
-            st.subheader("评估选项")
-            
-            # 评估指标
-            eval_metric = st.selectbox(
-                "优化目标指标",
-                ["R²", "MAE", "MSE", "RMSE"]
+        if st.session_state.model_name == "线性回归":
+            use_regularization = st.checkbox("使用正则化", value=True)
+            if use_regularization:
+                regularization_type = st.selectbox(
+                    "正则化类型", 
+                    ["L1 (Lasso)", "L2 (Ridge)", "ElasticNet"]
+                )
+        
+        elif st.session_state.model_name == "随机森林":
+            n_estimators_min = st.slider("最小树数量", 10, 100, 50, 10)
+            n_estimators_max = st.slider("最大树数量", 100, 500, 200, 50)
+            max_depth_min = st.slider("最小树深度", 2, 10, 5, 1)
+            max_depth_max = st.slider("最大树深度", 10, 30, 20, 5)
+        
+        elif st.session_state.model_name == "支持向量机":
+            kernel_types = st.multiselect(
+                "核函数类型", 
+                ["linear", "poly", "rbf", "sigmoid"],
+                default=["rbf"]
             )
-            
-            # 交叉验证
-            use_cv = st.checkbox("使用交叉验证", value=True)
-            
-            # 可视化
-            show_learning_curve = st.checkbox("显示学习曲线", value=True)
+            c_min = st.slider("最小C值", 0.1, 1.0, 0.1, 0.1)
+            c_max = st.slider("最大C值", 1.0, 10.0, 10.0, 1.0)
+        
+        elif st.session_state.model_name == "神经网络":
+            hidden_layer_sizes = st.text_input(
+                "隐藏层大小 (逗号分隔)", 
+                "10,10"
+            )
+            activation_functions = st.multiselect(
+                "激活函数", 
+                ["relu", "tanh", "logistic"],
+                default=["relu"]
+            )
+            learning_rates = st.multiselect(
+                "学习率", 
+                ["constant", "adaptive", "invscaling"],
+                default=["adaptive"]
+            )
+        
+        else:  # 梯度提升树
+            n_estimators_min = st.slider("最小树数量", 50, 200, 100, 50)
+            n_estimators_max = st.slider("最大树数量", 200, 1000, 500, 100)
+            learning_rate_min = st.slider("最小学习率", 0.01, 0.1, 0.01, 0.01)
+            learning_rate_max = st.slider("最大学习率", 0.1, 0.5, 0.2, 0.05)
+        
+        # 交叉验证设置
+        cv_folds = st.slider("交叉验证折数", 3, 10, 5, 1)
         
         if st.button("执行模型优化"):
             try:
                 with st.spinner("正在优化模型..."):
-                    model = st.session_state.model
-                    evaluator = ModelEvaluator(model)
+                    # 准备数据
+                    X = st.session_state.features[st.session_state.model.feature_cols]
+                    y = st.session_state.data[st.session_state.model.target_col]
+                    
+                    # 创建参数网格
+                    if st.session_state.model_name == "线性回归":
+                        if use_regularization:
+                            if regularization_type == "L1 (Lasso)":
+                                param_grid = {
+                                    "alpha": np.logspace(-4, 1, 20)
+                                }
+                                model_type = "lasso"
+                            elif regularization_type == "L2 (Ridge)":
+                                param_grid = {
+                                    "alpha": np.logspace(-4, 1, 20)
+                                }
+                                model_type = "ridge"
+                            else:
+                                param_grid = {
+                                    "alpha": np.logspace(-4, 1, 10),
+                                    "l1_ratio": np.linspace(0.1, 0.9, 9)
+                                }
+                                model_type = "elasticnet"
+                        else:
+                            param_grid = {}
+                            model_type = "linear_regression"
+                    
+                    elif st.session_state.model_name == "随机森林":
+                        param_grid = {
+                            "n_estimators": np.linspace(n_estimators_min, n_estimators_max, 5, dtype=int),
+                            "max_depth": np.linspace(max_depth_min, max_depth_max, 5, dtype=int),
+                            "min_samples_split": [2, 5, 10],
+                            "min_samples_leaf": [1, 2, 4]
+                        }
+                        model_type = "random_forest"
+                    
+                    elif st.session_state.model_name == "支持向量机":
+                        param_grid = {
+                            "kernel": kernel_types,
+                            "C": np.logspace(np.log10(c_min), np.log10(c_max), 5),
+                            "gamma": ["scale", "auto"] + list(np.logspace(-3, 0, 4))
+                        }
+                        model_type = "svm"
+                    
+                    elif st.session_state.model_name == "神经网络":
+                        hidden_layers = [tuple(map(int, hidden_layer_sizes.split(","))) for _ in range(1)]
+                        param_grid = {
+                            "hidden_layer_sizes": hidden_layers,
+                            "activation": activation_functions,
+                            "learning_rate": learning_rates,
+                            "alpha": np.logspace(-5, -3, 3)
+                        }
+                        model_type = "neural_network"
+                    
+                    else:  # 梯度提升树
+                        param_grid = {
+                            "n_estimators": np.linspace(n_estimators_min, n_estimators_max, 5, dtype=int),
+                            "learning_rate": np.linspace(learning_rate_min, learning_rate_max, 5),
+                            "max_depth": [3, 5, 7],
+                            "subsample": [0.8, 0.9, 1.0]
+                        }
+                        model_type = "gradient_boosting"
+                    
+                    # 创建模型
+                    model = BatteryPredictionModel()
                     
                     # 执行优化
-                    if optimization_method == "超参数优化":
-                        optimized_model = evaluator.optimize_hyperparameters(
-                            search_method=optimization_params["search_method"],
-                            n_iter=optimization_params["n_iter"],
-                            cv=optimization_params["cv"],
-                            scoring=eval_metric.lower()
-                        )
+                    if optimization_method == "网格搜索":
+                        search_method = "grid"
+                    elif optimization_method == "随机搜索":
+                        search_method = "random"
+                    else:
+                        search_method = "bayesian"
                     
-                    elif optimization_method == "特征选择":
-                        optimized_model = evaluator.select_features(
-                            method=optimization_params["selection_method"],
-                            n_features=optimization_params["n_features"]
-                        )
+                    # 优化模型
+                    best_params, best_score = model.optimize(
+                        X=X,
+                        y=y,
+                        model_type=model_type,
+                        param_grid=param_grid,
+                        search_method=search_method,
+                        cv=cv_folds
+                    )
                     
-                    elif optimization_method == "集成学习":
-                        optimized_model = evaluator.build_ensemble(
-                            method=optimization_params["ensemble_method"],
-                            base_models=optimization_params["base_models"]
-                        )
+                    # 使用最佳参数训练模型
+                    model.train(
+                        X=X,
+                        y=y,
+                        model_type=model_type,
+                        params=best_params,
+                        test_size=0.2,
+                        use_cv=True,
+                        cv_folds=cv_folds
+                    )
                     
                     # 更新会话状态
-                    st.session_state.model = optimized_model
+                    st.session_state.model = model
                     
                     # 显示优化结果
                     st.success("模型优化完成！")
                     
-                    # 显示优化后的评估指标
-                    st.subheader("优化后的模型评估")
-                    metrics = optimized_model.evaluate_model()
+                    st.subheader("最佳参数")
+                    st.json(best_params)
                     
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("R²", f"{metrics['r2']:.4f}")
-                    col2.metric("MAE", f"{metrics['mae']:.4f}")
-                    col3.metric("MSE", f"{metrics['mse']:.4f}")
-                    col4.metric("RMSE", f"{metrics['rmse']:.4f}")
+                    st.subheader("最佳得分")
+                    st.write(f"交叉验证得分: {best_score:.4f}")
                     
-                    # 显示预测vs实际值图
-                    st.subheader("预测 vs 实际值")
-                    fig = optimized_model.plot_prediction_vs_actual()
-                    st.pyplot(fig)
-                    
-                    # 显示学习曲线
-                    if show_learning_curve:
-                        st.subheader("学习曲线")
-                        fig = evaluator.plot_learning_curve(cv=5 if use_cv else None)
-                        st.pyplot(fig)
+                    # 显示优化后的模型性能
+                    st.subheader("优化后的模型性能")
+                    metrics = model.get_metrics()
+                    st.json(metrics)
                     
                     # 保存优化后的模型
-                    model_file = os.path.join(MODELS_FOLDER, "optimized_model.pkl")
-                    joblib.dump(optimized_model, model_file)
+                    model_file = os.path.join(MODELS_FOLDER, f"optimized_{model_type}_model.pkl")
+                    joblib.dump(model.model, model_file)
                     
                     st.info(f"优化后的模型已保存到 {model_file}")
             
@@ -894,38 +895,330 @@ elif st.session_state.current_step == 7:
                 st.error(f"优化模型时出错: {str(e)}")
         
         # 导航按钮
-        if st.button("返回预测与评估"):
-            st.session_state.current_step = 6
-            st.experimental_rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("返回预测与评估"):
+                st.session_state.current_step = 6
+                st.experimental_rerun()
+        with col2:
+            if st.button("继续到服务器连接"):
+                st.session_state.current_step = 8
+                st.experimental_rerun()
+
+# 8. 服务器连接页面
+elif st.session_state.current_step == 8:
+    st.title("8. 服务器连接")
+    
+    # 显示连接状态
+    if st.session_state.server_connected:
+        st.success(f"已连接到服务器: {st.session_state.server_connection.host}")
+    else:
+        st.info("未连接到服务器")
+    
+    # 创建选项卡
+    tabs = st.tabs(["连接设置", "文件上传", "脚本执行", "训练任务", "服务器状态"])
+    
+    # 连接设置选项卡
+    with tabs[0]:
+        st.subheader("服务器连接设置")
+        
+        # 如果已连接，显示断开按钮
+        if st.session_state.server_connected:
+            if st.button("断开连接"):
+                message = st.session_state.server_connection.disconnect()
+                st.session_state.server_connected = False
+                st.success(message)
+                st.experimental_rerun()
+        else:
+            # 连接表单
+            with st.form("connection_form"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    host = st.text_input("主机地址", "localhost")
+                    port = st.number_input("端口", min_value=1, max_value=65535, value=22)
+                    username = st.text_input("用户名", "ubuntu")
+                
+                with col2:
+                    auth_method = st.radio("认证方式", ["密码", "密钥文件"])
+                    
+                    if auth_method == "密码":
+                        password = st.text_input("密码", type="password")
+                        key_path = None
+                    else:
+                        password = None
+                        key_path = st.text_input("密钥文件路径", "~/.ssh/id_rsa")
+                
+                submit_button = st.form_submit_button("连接")
+                
+                if submit_button:
+                    try:
+                        auth_method_param = "password" if auth_method == "密码" else "key"
+                        success, message = st.session_state.server_connection.connect(
+                            host=host,
+                            port=port,
+                            username=username,
+                            auth_method=auth_method_param,
+                            password=password,
+                            key_path=key_path
+                        )
+                        
+                        if success:
+                            st.session_state.server_connected = True
+                            st.success(message)
+                        else:
+                            st.error(message)
+                    except Exception as e:
+                        st.error(f"连接错误: {str(e)}")
+    
+    # 文件上传选项卡
+    with tabs[1]:
+        st.subheader("文件上传")
+        
+        if not st.session_state.server_connected:
+            st.warning("请先连接到服务器")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # 选择本地文件
+                st.write("选择要上传的文件")
+                
+                # 显示可用的本地文件
+                local_files = []
+                
+                # 检查上传文件夹
+                if os.path.exists(UPLOAD_FOLDER):
+                    upload_files = [os.path.join(UPLOAD_FOLDER, f) for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
+                    local_files.extend(upload_files)
+                
+                # 检查输出文件夹
+                if os.path.exists(OUTPUT_FOLDER):
+                    output_files = [os.path.join(OUTPUT_FOLDER, f) for f in os.listdir(OUTPUT_FOLDER) if os.path.isfile(os.path.join(OUTPUT_FOLDER, f))]
+                    local_files.extend(output_files)
+                
+                # 检查模型文件夹
+                if os.path.exists(MODELS_FOLDER):
+                    model_files = [os.path.join(MODELS_FOLDER, f) for f in os.listdir(MODELS_FOLDER) if os.path.isfile(os.path.join(MODELS_FOLDER, f))]
+                    local_files.extend(model_files)
+                
+                # 显示文件选择器
+                selected_file = st.selectbox(
+                    "选择文件", 
+                    local_files,
+                    format_func=lambda x: os.path.basename(x)
+                )
+                
+                # 或者上传新文件
+                uploaded_file = st.file_uploader("或上传新文件")
+                if uploaded_file is not None:
+                    # 保存上传的文件
+                    file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    st.success(f"文件 {uploaded_file.name} 上传成功！")
+                    selected_file = file_path
+            
+            with col2:
+                # 设置远程路径
+                st.write("设置远程路径")
+                remote_path = st.text_input("远程文件路径", "/home/user/data/")
+                
+                # 上传按钮
+                if st.button("上传文件") and selected_file:
+                    try:
+                        # 构建完整的远程路径
+                        if remote_path.endswith("/"):
+                            full_remote_path = remote_path + os.path.basename(selected_file)
+                        else:
+                            full_remote_path = remote_path
+                        
+                        # 上传文件
+                        success, message = st.session_state.server_connection.upload_file(
+                            local_path=selected_file,
+                            remote_path=full_remote_path
+                        )
+                        
+                        if success:
+                            st.success(message)
+                        else:
+                            st.error(message)
+                    except Exception as e:
+                        st.error(f"上传文件错误: {str(e)}")
+    
+    # 脚本执行选项卡
+    with tabs[2]:
+        st.subheader("脚本执行")
+        
+        if not st.session_state.server_connected:
+            st.warning("请先连接到服务器")
+        else:
+            # 命令输入
+            command = st.text_area("输入要执行的命令", "ls -la")
+            
+            # 执行按钮
+            if st.button("执行命令"):
+                try:
+                    with st.spinner("正在执行命令..."):
+                        success, result = st.session_state.server_connection.execute_command(command)
+                        
+                        if success:
+                            st.success("命令执行成功")
+                            
+                            # 显示输出
+                            st.subheader("命令输出")
+                            st.code(result["stdout"])
+                            
+                            if result["stderr"]:
+                                st.subheader("错误输出")
+                                st.code(result["stderr"])
+                        else:
+                            st.error("命令执行失败")
+                            
+                            if "error" in result:
+                                st.error(result["error"])
+                            else:
+                                st.subheader("标准输出")
+                                st.code(result["stdout"])
+                                
+                                st.subheader("错误输出")
+                                st.code(result["stderr"])
+                                
+                                st.write(f"退出代码: {result['exit_code']}")
+                except Exception as e:
+                    st.error(f"执行命令错误: {str(e)}")
+    
+    # 训练任务选项卡
+    with tabs[3]:
+        st.subheader("训练任务")
+        
+        if not st.session_state.server_connected:
+            st.warning("请先连接到服务器")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # 脚本路径
+                script_path = st.text_input("脚本路径", "/home/user/train.py")
+                
+                # 脚本参数
+                script_args = st.text_area("脚本参数", "--epochs 100 --batch_size 32 --learning_rate 0.001")
+                
+                # 运行模式
+                background = st.checkbox("后台运行", value=True)
+            
+            with col2:
+                # 依赖库安装
+                st.subheader("依赖库安装")
+                
+                # 预定义的依赖库列表
+                dependencies = {
+                    "数据处理": ["pandas", "numpy", "matplotlib", "seaborn"],
+                    "机器学习": ["scikit-learn", "tensorflow", "keras"],
+                    "文件处理": ["openpyxl", "joblib"],
+                    "Web应用": ["streamlit"],
+                    "统计分析": ["scipy", "statsmodels"]
+                }
+                
+                # 选择要安装的依赖库
+                selected_deps = []
+                for category, libs in dependencies.items():
+                    st.write(f"**{category}**")
+                    for lib in libs:
+                        if st.checkbox(lib, value=True):
+                            selected_deps.append(lib)
+                
+                # 安装依赖库按钮
+                if st.button("安装依赖库"):
+                    try:
+                        with st.spinner("正在安装依赖库..."):
+                            # 构建pip安装命令
+                            pip_command = f"pip install {' '.join(selected_deps)}"
+                            
+                            # 执行命令
+                            success, result = st.session_state.server_connection.execute_command(pip_command)
+                            
+                            if success:
+                                st.success("依赖库安装成功")
+                            else:
+                                st.error("依赖库安装失败")
+                                
+                                if "error" in result:
+                                    st.error(result["error"])
+                                else:
+                                    st.code(result["stderr"])
+                    except Exception as e:
+                        st.error(f"安装依赖库错误: {str(e)}")
+            
+            # 启动训练按钮
+            if st.button("启动训练"):
+                try:
+                    with st.spinner("正在启动训练任务..."):
+                        success, result = st.session_state.server_connection.start_training(
+                            script_path=script_path,
+                            args=script_args,
+                            background=background
+                        )
+                        
+                        if success:
+                            st.success("训练任务启动成功")
+                            
+                            if "message" in result:
+                                st.info(result["message"])
+                            elif "stdout" in result:
+                                st.subheader("训练输出")
+                                st.code(result["stdout"])
+                        else:
+                            st.error("训练任务启动失败")
+                            
+                            if "error" in result:
+                                st.error(result["error"])
+                            elif "stderr" in result:
+                                st.code(result["stderr"])
+                except Exception as e:
+                    st.error(f"启动训练任务错误: {str(e)}")
+    
+    # 服务器状态选项卡
+    with tabs[4]:
+        st.subheader("服务器状态")
+        
+        if not st.session_state.server_connected:
+            st.warning("请先连接到服务器")
+        else:
+            # 刷新状态按钮
+            if st.button("刷新状态"):
+                try:
+                    with st.spinner("正在获取服务器状态..."):
+                        success, status = st.session_state.server_connection.check_status()
+                        
+                        if success:
+                            # 显示系统信息
+                            st.subheader("系统信息")
+                            st.code(status["uptime"])
+                            
+                            # 显示内存信息
+                            st.subheader("内存信息")
+                            for line in status["memory"]:
+                                st.code(line)
+                            
+                            # 显示GPU信息
+                            st.subheader("GPU信息")
+                            for line in status["gpu"]:
+                                st.code(line)
+                        else:
+                            st.error("获取服务器状态失败")
+                            
+                            if "error" in status:
+                                st.error(status["error"])
+                except Exception as e:
+                    st.error(f"获取服务器状态错误: {str(e)}")
+    
+    # 导航按钮
+    if st.button("返回模型优化"):
+        st.session_state.current_step = 7
+        st.experimental_rerun()
 
 # 页脚
 st.markdown("---")
-st.markdown("### 电池寿命预测系统 | 基于机器学习的SOH和RUL预测")
-st.markdown("© 2025 科技信息部-李吉逸电池健康管理团队")
-
-import requests
-
-# Function to connect to the server
-def connect_to_server(ip, port):
-    url = f"http://{ip}:{port}"  # Use the IP and port entered by the user
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            st.success(f"Successfully connected to the server at {ip}:{port}!")
-        else:
-            st.error(f"Connection failed, status code: {response.status_code}")
-    except Exception as e:
-        st.error(f"Error connecting to the server: {str(e)}")
-
-# Input fields for IP and port (organized in columns)
-col1, col2 = st.columns([2, 1])  # Create two columns with different widths
-
-with col1:
-    ip = st.text_input("Enter server IP:", "localhost")  # Default to localhost
-
-with col2:
-    port = st.number_input("Enter server port:", min_value=1, max_value=65535, value=5000)  # Default to 5000
-
-# Button to trigger server connection with a custom style
-if st.button("Connect to Server", use_container_width=True):
-    connect_to_server(ip, port)
+st.markdown("电池寿命预测系统 | 版本 1.0")
