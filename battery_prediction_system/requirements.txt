@@ -12,3 +12,5 @@ pywavelets
 openpyxl
 streamlit
 gitpython
+paramiko
+scp
